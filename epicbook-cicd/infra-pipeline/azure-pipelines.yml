@@ -1,0 +1,115 @@
+# Infra Pipeline — provisions Azure infrastructure using Terraform
+# Triggered when Terraform files change in the infra repo
+# Uses Azure Resource Manager (SPN) service connection to authenticate
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - terraform/**
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+
+  # ───────────────────────────────────────
+  # Stage 1 — Terraform Init
+  # Downloads providers and configures remote state backend
+  # Remote state stores terraform.tfstate in Azure Blob Storage
+  # so the pipeline can always see current infrastructure state
+  # ───────────────────────────────────────
+  - stage: TerraformInit
+    displayName: 'Stage 1 — Terraform Init'
+    jobs:
+      - job: init
+        displayName: 'Initialise Terraform'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: 'latest'
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform init'
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+              backendServiceArm: 'azure-service-connection'
+              backendAzureRmResourceGroupName: 'tfstate-rg'
+              backendAzureRmStorageAccountName: 'epicbooktfstate'
+              backendAzureRmContainerName: 'tfstate'
+              backendAzureRmKey: 'epicbook.tfstate'
+
+  # ───────────────────────────────────────
+  # Stage 2 — Terraform Plan
+  # Shows what will be created, changed, or destroyed
+  # No resources are touched in this stage — review only
+  # ───────────────────────────────────────
+  - stage: TerraformPlan
+    displayName: 'Stage 2 — Terraform Plan'
+    dependsOn: TerraformInit
+    jobs:
+      - job: plan
+        displayName: 'Terraform Plan'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: 'latest'
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform plan'
+            inputs:
+              provider: 'azurerm'
+              command: 'plan'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+              environmentServiceNameAzureRM: 'azure-service-connection'
+
+  # ───────────────────────────────────────
+  # Stage 3 — Terraform Apply
+  # Creates the actual infrastructure
+  # Captures outputs (app IP, MySQL FQDN) for the App Pipeline
+  # ───────────────────────────────────────
+  - stage: TerraformApply
+    displayName: 'Stage 3 — Terraform Apply'
+    dependsOn: TerraformPlan
+    jobs:
+      - job: apply
+        displayName: 'Terraform Apply'
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: 'latest'
+
+          - task: TerraformTaskV4@4
+            displayName: 'terraform apply'
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+              environmentServiceNameAzureRM: 'azure-service-connection'
+              commandOptions: '-auto-approve'
+
+          - script: |
+              cd $(System.DefaultWorkingDirectory)/terraform
+
+              APP_IP=$(terraform output -raw app_public_ip)
+              MYSQL_FQDN=$(terraform output -raw mysql_fqdn)
+
+              echo "App Public IP:  $APP_IP"
+              echo "MySQL FQDN:     $MYSQL_FQDN"
+
+              # Store as pipeline variables for downstream use
+              echo "##vso[task.setvariable variable=APP_PUBLIC_IP;isOutput=true]$APP_IP"
+              echo "##vso[task.setvariable variable=MYSQL_FQDN;isOutput=true]$MYSQL_FQDN"
+            name: capture_outputs
+            displayName: 'Capture Terraform outputs'
