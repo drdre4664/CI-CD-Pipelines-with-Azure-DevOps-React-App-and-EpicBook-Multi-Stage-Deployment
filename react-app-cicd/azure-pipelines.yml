@@ -1,0 +1,117 @@
+# Triggers automatically on every commit to main
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+# Pipeline runs 4 stages in sequence:
+# Build → Test → Publish → Deploy
+# Each stage only runs if the previous one passes
+
+stages:
+
+  # ───────────────────────────────────────
+  # Stage 1 — Build
+  # Install Node.js, run npm install, build React app
+  # Output: /build folder ready to deploy
+  # ───────────────────────────────────────
+  - stage: Build
+    displayName: 'Stage 1 — Build'
+    jobs:
+      - job: build
+        displayName: 'Build React App'
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js 18'
+            inputs:
+              versionSpec: '18.x'
+
+          - script: npm install
+            displayName: 'Install dependencies'
+
+          - script: npm run build
+            displayName: 'Build React app'
+
+          - publish: $(System.DefaultWorkingDirectory)/build
+            artifact: react_build
+            displayName: 'Publish build folder as artifact'
+
+  # ───────────────────────────────────────
+  # Stage 2 — Test
+  # Run unit tests — pipeline fails here if tests fail
+  # This ensures broken code never reaches deployment
+  # ───────────────────────────────────────
+  - stage: Test
+    displayName: 'Stage 2 — Test'
+    dependsOn: Build
+    jobs:
+      - job: test
+        displayName: 'Run Unit Tests'
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js 18'
+            inputs:
+              versionSpec: '18.x'
+
+          - script: npm install
+            displayName: 'Install dependencies'
+
+          - script: npm test -- --watchAll=false --ci
+            displayName: 'Run unit tests'
+
+  # ───────────────────────────────────────
+  # Stage 3 — Publish
+  # Download and inspect the artifact
+  # Confirms the build output is valid before deploying
+  # ───────────────────────────────────────
+  - stage: Publish
+    displayName: 'Stage 3 — Publish'
+    dependsOn: Test
+    jobs:
+      - job: publish
+        displayName: 'Inspect Artifact'
+        steps:
+          - download: current
+            artifact: react_build
+
+          - script: |
+              echo "Artifact contents:"
+              ls -la $(Pipeline.Workspace)/react_build
+            displayName: 'List artifact files'
+
+  # ───────────────────────────────────────
+  # Stage 4 — Deploy
+  # Copy build files to VM over SSH
+  # Restart Nginx to serve the new build
+  # ───────────────────────────────────────
+  - stage: Deploy
+    displayName: 'Stage 4 — Deploy'
+    dependsOn: Publish
+    jobs:
+      - job: deploy
+        displayName: 'Deploy to VM via SSH'
+        steps:
+          - download: current
+            artifact: react_build
+
+          - task: CopyFilesOverSSH@0
+            displayName: 'Copy build files to /var/www/html'
+            inputs:
+              sshEndpoint: 'ubuntu-nginx-ssh'
+              sourceFolder: '$(Pipeline.Workspace)/react_build'
+              targetFolder: '/var/www/html'
+              cleanTargetFolder: true
+
+          - task: SSH@0
+            displayName: 'Restart Nginx'
+            inputs:
+              sshEndpoint: 'ubuntu-nginx-ssh'
+              runOptions: 'inline'
+              inline: 'sudo systemctl restart nginx'
