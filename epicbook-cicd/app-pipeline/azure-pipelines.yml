@@ -1,0 +1,87 @@
+# App Pipeline — configures VMs and deploys EpicBook using Ansible
+# Triggered when Ansible files change in the app repo
+# SSH key is stored securely in Azure DevOps Secure Files
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - ansible/**
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+# These are passed in manually after the Infra Pipeline runs
+# In a mature setup these would be fed automatically via pipeline linking
+variables:
+  APP_PUBLIC_IP: ''
+  MYSQL_FQDN: ''
+
+stages:
+
+  # ───────────────────────────────────────
+  # Stage 1 — Configure and Deploy
+  # Installs Ansible, downloads SSH key from Secure Files,
+  # generates inventory from Terraform outputs,
+  # runs playbook, verifies site is live
+  # ───────────────────────────────────────
+  - stage: Configure
+    displayName: 'Stage 1 — Configure & Deploy'
+    jobs:
+      - job: ansible
+        displayName: 'Run Ansible Roles'
+        steps:
+          - checkout: self
+
+          - script: |
+              sudo apt-get update -y
+              sudo apt-get install -y ansible
+              ansible --version
+            displayName: 'Install Ansible'
+
+          # SSH key is stored in Azure DevOps Library → Secure Files
+          # Never committed to git — downloaded at pipeline runtime only
+          - task: DownloadSecureFile@1
+            name: sshKey
+            displayName: 'Download SSH private key from Secure Files'
+            inputs:
+              secureFile: 'id_ed25519'
+
+          - script: chmod 600 $(sshKey.secureFilePath)
+            displayName: 'Set SSH key permissions'
+
+          # Generate inventory.ini using the IP from Terraform output
+          # StrictHostKeyChecking=no prevents the pipeline hanging on first connect
+          - script: |
+              cat > ansible/inventory.ini << EOF
+              [web]
+              $(APP_PUBLIC_IP)
+
+              [web:vars]
+              ansible_user=azureuser
+              ansible_ssh_private_key_file=$(sshKey.secureFilePath)
+              ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+              EOF
+              echo "Inventory generated:"
+              cat ansible/inventory.ini
+            displayName: 'Generate inventory from Terraform outputs'
+
+          # Inject MySQL host into group_vars so Ansible knows where the DB is
+          - script: |
+              sed -i "s|mysql_host:.*|mysql_host: $(MYSQL_FQDN)|" ansible/group_vars/web.yml
+              echo "Updated group_vars:"
+              cat ansible/group_vars/web.yml
+            displayName: 'Inject MySQL FQDN into group vars'
+
+          - script: |
+              ansible-playbook -i ansible/inventory.ini ansible/site.yml
+            displayName: 'Run Ansible playbook (common → nginx → epicbook)'
+
+          # Final health check — fail the pipeline if site is not live
+          - script: |
+              echo "Verifying deployment at http://$(APP_PUBLIC_IP)..."
+              curl -f --retry 5 --retry-delay 5 http://$(APP_PUBLIC_IP)
+              echo "Deployment verified — EpicBook is live"
+            displayName: 'Verify site is live'
