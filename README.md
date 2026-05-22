@@ -204,7 +204,7 @@ pool:
 
 ---
 
-## What I Learned
+## Design Principles
 
 **CI/CD removes human error from deployments** — every deployment follows the exact same steps in the exact same order. There is no "I forgot to restart Nginx" or "I deployed to the wrong server."
 
